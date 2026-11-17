@@ -183,11 +183,15 @@ pub const SemanticPruner = struct {
         return allowed;
     }
 
-    /// Applies packed 64-bit logit mask directly to a 128k+ f32 logit vector in-place.
-    /// Disallowed tokens are set to -inf.
+    /// Applies packed 64-bit logit mask directly to a 128k+ f32 logit vector in-place
+    /// using portable 4-lane SIMD (@Vector(4, f32)) selection. Disallowed tokens become -inf.
     pub fn maskLogitsF32(logits: []f32, mask_words: []const u64) void {
-        const neg_inf = -std.math.inf(f32);
+        const neg_inf_val = -std.math.inf(f32);
+        const neg_inf_vec: @Vector(4, f32) = @splat(neg_inf_val);
+        const bit_masks: @Vector(4, u32) = .{ 1, 2, 4, 8 };
+        const zero_u32: @Vector(4, u32) = @splat(0);
         const n_words = @min(mask_words.len, (logits.len + 63) >> 6);
+
         var w: usize = 0;
         while (w < n_words) : (w += 1) {
             const word = mask_words[w];
@@ -195,13 +199,20 @@ pub const SemanticPruner = struct {
             const end = @min(base + 64, logits.len);
             if (word == std.math.maxInt(u64)) continue;
             if (word == 0) {
-                @memset(logits[base..end], neg_inf);
+                @memset(logits[base..end], neg_inf_val);
                 continue;
             }
-            var bit: usize = 0;
-            while (base + bit < end) : (bit += 1) {
-                if ((word & (@as(u64, 1) << @as(u6, @intCast(bit)))) == 0) {
-                    logits[base + bit] = neg_inf;
+            var off: usize = 0;
+            while (base + off + 4 <= end) : (off += 4) {
+                const nib: u32 = @intCast((word >> @as(u6, @intCast(off))) & 0xF);
+                const splat_nib: @Vector(4, u32) = @splat(nib);
+                const keep = (splat_nib & bit_masks) != zero_u32;
+                const v: @Vector(4, f32) = logits[base + off ..][0..4].*;
+                logits[base + off ..][0..4].* = @select(f32, keep, v, neg_inf_vec);
+            }
+            while (base + off < end) : (off += 1) {
+                if ((word & (@as(u64, 1) << @as(u6, @intCast(off)))) == 0) {
+                    logits[base + off] = neg_inf_val;
                 }
             }
         }
