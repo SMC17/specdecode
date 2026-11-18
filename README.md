@@ -1,5 +1,7 @@
 # specdecode
 
+**[Status](STATUS.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/SMC17/specdecode/issues) · [Public roadmap](https://github.com/users/SMC17/projects/16)**
+
 **Zero-GC Mid-Decode Semantic & Type-State Pruner, 128k-Vocab Logit-Mask C ABI (`libspecdecode`), WebAssembly SIMD (`specdecode.wasm`), Entropy-Guided KV-Cache Paging, and Speculative Cascade Router.**
 
 ## Capabilities
