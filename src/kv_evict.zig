@@ -17,8 +17,8 @@ pub const KvBlock = struct {
 pub const KvPagePool = struct {
     allocator: std.mem.Allocator,
     max_blocks: usize,
-    blocks: std.ArrayListUnmanaged(KvBlock) = .{},
-    hash_index: std.AutoHashMapUnmanaged([32]u8, u32) = .{},
+    blocks: std.ArrayList(KvBlock) = .empty,
+    hash_index: std.AutoHashMapUnmanaged([32]u8, u32) = .empty,
     next_id: u32 = 1,
     dedup_hits: u64 = 0,
     evictions: u64 = 0,

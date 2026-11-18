@@ -1,2 +1,2 @@
 # specdecode
-> Zero-allocation mid-decode semantic pruner, 128k-vocab f32 logit-mask C ABI, entropy-guided KV-cache paging, and speculative cascade router in Zig 0.15.2.
+> Zero-allocation mid-decode semantic pruner, 128k-vocab f32 logit-mask C ABI, entropy-guided KV-cache paging, and speculative cascade router in Zig 0.16.0.
