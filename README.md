@@ -1,66 +1,81 @@
 # specdecode
 
-**[Status](STATUS.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/SMC17/specdecode/issues) · [Public roadmap](https://github.com/users/SMC17/projects/16)**
+**[Status](STATUS.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/SMC17/specdecode/issues)**
 
-**Zero-GC Mid-Decode Semantic & Type-State Pruner, 128k-Vocab Logit-Mask C ABI (`libspecdecode`), WebAssembly SIMD (`specdecode.wasm`), Entropy-Guided KV-Cache Paging, and Speculative Cascade Router.**
+Pieces for constraining and routing LLM decoding, in Zig 0.16:
 
-## Capabilities
-* **Mid-Decode Type-State & Contract Pruning:** Enforces symbol existence, function arity, argument types, and numeric bounds per decode step in `87 ns`.
-* **128k-Vocab `f32` Logit Masking (`specdecode_mask_logits_f32`):** Portable SIMD packed `u64` bitmasking over 128,256+ logits in `16 µs` (`0.0177 ms/step` via Python `ctypes`) for `llama.cpp`, `MLX`, `vLLM`, Node, Edge, and Browsers.
-* **Entropy-Guided KV-Cache Paging & Prefix Dedup:** Blake3 prefix deduplication + attention-sink pinning + attention/entropy utility eviction (`275 ns/admit`).
-* **Self-Verifying Cascade Router:** Routes tokens between local draft and frontier verifier using live semantic checks and an anytime-valid Bernoulli SPRT e-process (`16 ns/route`).
+- **A logit mask kernel** (`maskLogitsF32`): it applies a packed `u64` allow-bitset to an `f32`
+  logit vector in place, setting disallowed entries to `-inf`. It is exported as a C ABI
+  (`libspecdecode`), as WebAssembly (`specdecode.wasm`) with an ESM wrapper, and through Python
+  `ctypes`. This is the most usable part.
+- **A toy type-state pruner** (`SemanticPruner`) over a tiny call grammar,
+  `name ( arg , arg )`. It checks known symbols, arity, argument types and numeric ranges, and
+  can build an allow-mask over a vocabulary of whole-token strings.
+- **A KV block bookkeeping model** (`KvPagePool`). It deduplicates blocks by Blake3 of their
+  token bytes, pins "sink" blocks, and evicts by an attention/entropy score. It tracks metadata
+  only: it holds no KV tensors.
+- **A draft/frontier router** (`CascadeRouter`). It escalates a token when the pruner rejects it
+  or when draft confidence is below 0.35, and also when a cumulative failure statistic
+  crosses a threshold.
 
-## Build & Test
+Status: **unit-tested** (6 Zig tests, plus the Node WASM and Python ctypes smoke tests). This is
+a prototype. Nothing here is integrated into llama.cpp, MLX or vLLM. The C/WASM mask is the
+piece that would plug into one.
+
+## What it is not
+
+- **The pruner is not a grammar engine for real tokenizers.** It works on whole-word string
+  tokens of one call form. Real BPE vocabularies split identifiers across tokens, and that case
+  is not handled.
+- **The router's statistic is CUSUM, not an SPRT or an e-process.** It is clamped at zero, so the
+  `alpha <= 0.05` in the code comment is not an error bound
+  ([#3](https://github.com/SMC17/specdecode/issues/3)).
+
+## Build
+
 ```sh
-zig build test
-zig build -Doptimize=ReleaseFast
-zig build wasm
+# Zig 0.16.0
+zig build test --summary all            # 6/6
+zig build -Doptimize=ReleaseFast        # also builds zig-out/lib/libspecdecode.{dylib,so}
+zig build wasm                          # zig-out/bin/specdecode.wasm
+node test_wasm.mjs                      # [ 1, -Infinity, 3, -Infinity ]
+python3 python/specdecode.py            # ctypes smoke test
 ./zig-out/bin/specdecode bench
-```
-
-## Benchmarks (128,256 `f32` Logits, 200 Decode Steps)
-Measured on Apple Silicon with `zig build -Doptimize=ReleaseFast`:
-- Native Zig (`./zig-out/bin/specdecode bench`): `16 µs` per 128k mask (`87 ns` prune step, `275 ns` KV admit, `16 ns` cascade route)
-- Python `ctypes` (`python3 benchmarks/bench_128k.py`): `0.0177 ms/step` (`3.55 ms` total) vs pure Python loop `10.7886 ms/step` (`2157.72 ms` total) — **`607.8x` speedup**
-
-## C / C++ (`include/specdecode.h`)
-Link against `zig-out/lib/libspecdecode.dylib` (macOS) or `zig-out/lib/libspecdecode.so` (Linux):
-```c
-#include "include/specdecode.h"
-
-// Allowed tokens have bit (i & 63) set to 1 in mask_words[i >> 6].
-// Disallowed logits are overwritten with -INFINITY in-place.
-int32_t rc = specdecode_mask_logits_f32(logits, n_logits, mask_words, n_words);
-```
-
-## Python (`python/specdecode.py`)
-```python
-import ctypes
-from python.specdecode import load_lib
-
-lib = load_lib()
-logits = (ctypes.c_float * 4)(1.0, 2.0, 3.0, 4.0)
-words = (ctypes.c_uint64 * 1)(0b1010)  # allow indices 1 and 3
-assert lib.specdecode_mask_logits_f32(logits, 4, words, 1) == 0
-```
-Run smoke test and benchmark:
-```sh
-python3 python/specdecode.py
 python3 benchmarks/bench_128k.py
 ```
 
-## npm / WebAssembly (`npm/index.mjs`)
-Zero-dependency ESM + TypeScript wrapper around `specdecode.wasm` for Node, Edge runtimes, and Browsers:
+C usage (`include/specdecode.h`). Allowed tokens have bit `i & 63` set in `mask_words[i >> 6]`:
+
+```c
+int32_t rc = specdecode_mask_logits_f32(logits, n_logits, mask_words, n_words);
+```
+
+JavaScript:
+
 ```js
 import { createSpecdecode } from "./npm/index.mjs";
-
 const sd = await createSpecdecode();
-const logits = new Float32Array([1.0, 2.0, 3.0, 4.0]);
-const words = new BigUint64Array([0b0101n]); // allow indices 0 and 2
-sd.maskLogits(logits, words);
-// logits is now Float32Array [1, -Infinity, 3, -Infinity]
+const logits = new Float32Array([1, 2, 3, 4]);
+sd.maskLogits(logits, new BigUint64Array([0b0101n])); // -> [1, -Infinity, 3, -Infinity]
 ```
-Run the Node WASM test:
-```sh
-node test_wasm.mjs
-```
+
+## Measured
+
+Apple M2 Max, macOS 26.4, Zig 0.16.0 ReleaseFast, commit `e119167`, 2026-11-19.
+
+| What | Workload | Result | Script |
+| --- | --- | ---: | --- |
+| `maskLogitsF32` | 128,256 logits, alternating-bit mask, 100 runs | 12–13 µs per mask | `specdecode bench` |
+| Same through Python `ctypes` | 128,256 logits, 200 steps | 0.0195 ms per step | `benchmarks/bench_128k.py` |
+| `buildLogitMask` | **8-token** vocabulary | ~85 ns | `specdecode bench` |
+| `KvPagePool.admitBlock` | 2,000 admits, 64-block pool | ~300 ns | `specdecode bench` |
+| `CascadeRouter.routeStep` | 10,000 steps, one fixed token | ~16 ns | `specdecode bench` |
+
+The ~85 ns pruner figure covers 8 tokens. On a real vocabulary the pruner runs once per token
+per step, so cost grows with vocabulary size, and that has not been measured. `bench_128k.py`
+also prints a speedup over a pure-Python loop. That comparator is a strawman: NumPy masking
+is the fair baseline, and it has not been measured yet.
+
+## License
+
+MIT
