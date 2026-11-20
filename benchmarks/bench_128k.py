@@ -43,11 +43,28 @@ def main() -> None:
 
     assert py_logits[0] == 0.0 and py_logits[1] == neg_inf
 
-    speedup = py_ms_per_step / c_ms_per_step
     print(f"vocab={N_LOGITS} steps={N_STEPS}")
     print(f"libspecdecode (ctypes): {c_ms_per_step:.4f} ms/step ({c_elapsed_ms:.2f} ms total)")
-    print(f"pure python loop:       {py_ms_per_step:.4f} ms/step ({py_elapsed_ms:.2f} ms total)")
-    print(f"speedup:                {speedup:.1f}x")
+    print(f"pure python loop:       {py_ms_per_step:.4f} ms/step  (a strawman, kept for reference)")
+
+    # The fair comparator: NumPy, unpacking the same packed bitset and masking in place.
+    try:
+        import numpy as np
+    except ImportError:
+        print("numpy:                  not installed (uv run --with numpy python3 benchmarks/bench_128k.py)")
+        return
+    np_logits = np.array([float(i % 100) for i in range(N_LOGITS)], dtype=np.float32)
+    np_words = np.full(N_WORDS, MASK_WORD, dtype=np.uint64)
+    keep = np.unpackbits(np_words.view(np.uint8), bitorder="little")[:N_LOGITS].astype(bool)
+    np_logits[~keep] = -np.inf  # warm-up
+    assert np_logits[0] == 0.0 and np_logits[1] == -np.inf
+    t2 = time.perf_counter()
+    for _ in range(N_STEPS):
+        keep = np.unpackbits(np_words.view(np.uint8), bitorder="little")[:N_LOGITS].astype(bool)
+        np_logits[~keep] = -np.inf
+    np_ms_per_step = (time.perf_counter() - t2) * 1000.0 / N_STEPS
+    print(f"numpy (unpack + mask):  {np_ms_per_step:.4f} ms/step")
+    print(f"libspecdecode vs numpy: {np_ms_per_step / c_ms_per_step:.1f}x")
 
 
 if __name__ == "__main__":
