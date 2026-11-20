@@ -22,7 +22,11 @@ pub const CascadeRouter = struct {
     pruner: decode_prune.SemanticPruner,
     target_error_rate: f64 = 0.05,
     alt_error_rate: f64 = 0.25,
-    e_threshold: f64 = 20.0, // alpha <= 0.05
+    /// CUSUM e-detector threshold. Each step's Bernoulli likelihood ratio (p1 vs p0) is an
+    /// e-value when failures occur at rate p0, so with failures at rate p0 the mean steps
+    /// between drift escalations is at least `e_threshold`. It is a run-length bound, not an
+    /// error rate; it assumes failures are independent.
+    e_threshold: f64 = 1000.0,
     log_e: f64 = 0.0,
     total_steps: u64 = 0,
     escalations: u64 = 0,
@@ -41,7 +45,7 @@ pub const CascadeRouter = struct {
         const next_state = self.pruner.stepToken(state, proposed_token);
         const semantic_fail = next_state.invalid or draft_confidence < 0.35;
 
-        // Bernoulli SPRT log-likelihood ratio update
+        // CUSUM e-detector over the Bernoulli log-likelihood ratio (p1 vs p0)
         const p0 = self.target_error_rate;
         const p1 = self.alt_error_rate;
         const lr = if (semantic_fail)
@@ -90,7 +94,7 @@ test "CascadeRouter routes valid high-confidence tokens locally and escalates se
     try std.testing.expectEqual(ModelTier.frontier_verifier, d1.tier);
     try std.testing.expect(d1.escalated_by_verifier);
 
-    // Repeated low-confidence tokens trip anytime-valid e-process even if syntax passes
+    // Repeated low-confidence tokens trip the drift detector even if syntax passes
     var tripped_e = false;
     var i: usize = 0;
     while (i < 10) : (i += 1) {
@@ -101,4 +105,15 @@ test "CascadeRouter routes valid high-confidence tokens locally and escalates se
         }
     }
     try std.testing.expect(tripped_e);
+}
+
+test "drift detector: increments are e-values at rate p0, and threshold 1000 trips after 5 straight failures" {
+    const r = CascadeRouter.init(decode_prune.SemanticPruner.init(&.{}));
+    const p0 = r.target_error_rate;
+    const p1 = r.alt_error_rate;
+    // E[LR] under p0 is exactly 1.
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), p0 * (p1 / p0) + (1 - p0) * ((1 - p1) / (1 - p0)), 1e-12);
+    const per_fail = @log(p1 / p0);
+    try std.testing.expect(4 * per_fail < @log(r.e_threshold));
+    try std.testing.expect(5 * per_fail >= @log(r.e_threshold));
 }

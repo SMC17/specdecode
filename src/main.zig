@@ -52,6 +52,25 @@ pub fn main(init: std.process.Init) !void {
         }
         const kv_ns = elapsedNs(io, start) / 2000;
 
+        // Pruner on a vocabulary of realistic size: 32,000 whole-word tokens
+        // (identifiers, numbers, punctuation), one mask per decode step.
+        const big_n = 32_000;
+        const big_vocab = try alloc.alloc([]const u8, big_n);
+        for (big_vocab, 0..) |*t, k| {
+            t.* = switch (k % 4) {
+                0 => try std.fmt.allocPrint(alloc, "ident{d}", .{k}),
+                1 => try std.fmt.allocPrint(alloc, "0.{d}", .{k}),
+                2 => if (k % 8 == 2) "," else ")",
+                else => if (k == 3) "delta" else try std.fmt.allocPrint(alloc, "\"s{d}\"", .{k}),
+            };
+        }
+        const big_mask = try alloc.alloc(u64, (big_n + 63) / 64);
+        start = std.Io.Timestamp.now(io, .awake);
+        i = 0;
+        while (i < 200) : (i += 1) sink +%= pruner.buildLogitMask(st, big_vocab, big_mask);
+        std.mem.doNotOptimizeAway(sink);
+        const prune_32k_us = (elapsedNs(io, start) / 200) / 1000;
+
         var router = cascade_router.CascadeRouter.init(pruner);
         start = std.Io.Timestamp.now(io, .awake);
         i = 0;
@@ -63,8 +82,8 @@ pub fn main(init: std.process.Init) !void {
         var out: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(
             &out,
-            "{{\"prune_ns_per_step\":{d},\"mask_128k_us\":{d},\"kv_evict_ns_per_admit\":{d},\"cascade_ns_per_route\":{d}}}\n",
-            .{ prune_ns, mask_128k_us, kv_ns, cascade_ns },
+            "{{\"prune_8tok_ns_per_step\":{d},\"prune_32k_vocab_us_per_step\":{d},\"mask_128k_us\":{d},\"kv_evict_ns_per_admit\":{d},\"cascade_ns_per_route\":{d}}}\n",
+            .{ prune_ns, prune_32k_us, mask_128k_us, kv_ns, cascade_ns },
         );
         try std.Io.File.stdout().writeStreamingAll(io, msg);
         return;
